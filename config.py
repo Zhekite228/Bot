@@ -19,11 +19,23 @@ OCR_SPACE_API_KEY = os.getenv("OCR_SPACE_API_KEY", "")
 DATABASE_PATH = Path(os.getenv("DATABASE_PATH", _default_db_path))
 MIN_LAP_TIME_SECONDS = 38.5
 MAX_LAP_SPEED = 300
+DEFAULT_CAR_RANK = "S"
 
 TRACKS: dict[str, str] = {
     "obiezdnaya": "Обьездная",
     "proseka": "Просека",
     "ferma": "ферма",
+}
+
+CAR_CLASSES: dict[str, str] = {
+    "all": "Общий",
+    "F": "F",
+    "E": "E",
+    "D": "D",
+    "C": "C",
+    "B": "B",
+    "A": "A",
+    "S": "S",
 }
 
 _admin_ids_raw = os.getenv("ADMIN_IDS", "")

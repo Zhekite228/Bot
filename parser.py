@@ -49,6 +49,17 @@ SPEED_PATTERN = re.compile(
 )
 
 
+def normalize_car_rank(value: str | None) -> str:
+    if not value:
+        return config.DEFAULT_CAR_RANK
+
+    cleaned = value.strip()
+    if cleaned in {"—", "-", ""}:
+        return config.DEFAULT_CAR_RANK
+
+    return cleaned.upper()
+
+
 def parse_race_text(text: str) -> ParsedRaceData:
     normalized = text.replace("\r", "\n")
     lines = [line.strip() for line in normalized.split("\n") if line.strip()]
@@ -56,7 +67,7 @@ def parse_race_text(text: str) -> ParsedRaceData:
 
     table_row = _parse_first_place_row(normalized)
     if table_row:
-        car_rank = _extract_rank_from_header(normalized) or "—"
+        car_rank = normalize_car_rank(_extract_rank_from_header(normalized))
         return ParsedRaceData(
             track=track,
             track_name=track_name,
@@ -73,7 +84,9 @@ def parse_race_text(text: str) -> ParsedRaceData:
     time_value, time_seconds = _extract_time(normalized, labeled.get("time"))
     speed_value, speed_number = _extract_speed(normalized, labeled.get("max_speed"))
 
-    car_rank = labeled.get("car_rank") or _extract_rank_from_header(normalized) or _guess_rank(lines) or "—"
+    car_rank = normalize_car_rank(
+        labeled.get("car_rank") or _extract_rank_from_header(normalized) or _guess_rank(lines)
+    )
     car = labeled.get("car") or _guess_car(lines) or "—"
     engine = labeled.get("engine") or _guess_engine(lines) or "—"
 

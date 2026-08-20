@@ -129,7 +129,98 @@ class RaceDatabase:
             conn.commit()
             return cursor.rowcount > 0
 
-    def delete_result(self, track: str, result_id: int) -> bool:
+    def confirm_result_if_pending(self, track: str, result_id: int) -> bool:
+        table = self._table_name(track)
+        with self._connect() as conn:
+            cursor = conn.execute(
+                f"UPDATE {table} SET confirmed = 1 WHERE id = ? AND confirmed = 0",
+                (result_id,),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+
+    def update_result(
+        self,
+        track: str,
+        result_id: int,
+        *,
+        car_rank: Optional[str] = None,
+        car: Optional[str] = None,
+        engine: Optional[str] = None,
+        time: Optional[str] = None,
+        time_seconds: Optional[float] = None,
+        max_speed: Optional[str] = None,
+        max_speed_value: Optional[float] = None,
+    ) -> bool:
+        fields: dict[str, object] = {}
+        if car_rank is not None:
+            fields["car_rank"] = car_rank
+        if car is not None:
+            fields["car"] = car
+        if engine is not None:
+            fields["engine"] = engine
+        if time is not None:
+            fields["time"] = time
+        if time_seconds is not None:
+            fields["time_seconds"] = time_seconds
+        if max_speed is not None:
+            fields["max_speed"] = max_speed
+        if max_speed_value is not None:
+            fields["max_speed_value"] = max_speed_value
+        if not fields:
+            return False
+
+        table = self._table_name(track)
+        assignments = ", ".join(f"{column} = ?" for column in fields)
+        values = list(fields.values()) + [result_id]
+        with self._connect() as conn:
+            cursor = conn.execute(
+                f"UPDATE {table} SET {assignments} WHERE id = ?",
+                values,
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+
+    def move_result(self, from_track: str, result_id: int, to_track: str) -> Optional[int]:
+        if from_track not in config.TRACKS or to_track not in config.TRACKS:
+            raise ValueError("Неизвестная трасса")
+        if from_track == to_track:
+            return result_id
+
+        result = self.get_result(from_track, result_id)
+        if not result:
+            return None
+
+        from_table = self._table_name(from_track)
+        to_table = self._table_name(to_track)
+        with self._connect() as conn:
+            cursor = conn.execute(
+                f"""
+                INSERT INTO {to_table} (
+                    car_rank, car, engine, time, time_seconds,
+                    max_speed, max_speed_value, user_id, username, user_name, confirmed
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    result.car_rank,
+                    result.car,
+                    result.engine,
+                    result.time,
+                    result.time_seconds,
+                    result.max_speed,
+                    result.max_speed_value,
+                    result.user_id,
+                    result.username,
+                    result.user_name,
+                    1 if result.confirmed else 0,
+                ),
+            )
+            new_id = int(cursor.lastrowid)
+            conn.execute(f"DELETE FROM {from_table} WHERE id = ?", (result_id,))
+            conn.commit()
+        return new_id
+
         table = self._table_name(track)
         with self._connect() as conn:
             cursor = conn.execute(
@@ -139,13 +230,27 @@ class RaceDatabase:
             conn.commit()
             return cursor.rowcount > 0
 
-    def get_top_results(self, track: str, limit: int = 10) -> list[RaceResult]:
+    def get_top_results(
+        self,
+        track: str,
+        limit: int = 10,
+        car_class: str | None = None,
+    ) -> list[RaceResult]:
         table = self._table_name(track)
+        where_clause = ""
+        params: list[object] = []
+
+        if car_class and car_class != "all":
+            where_clause = "WHERE UPPER(REPLACE(car_rank, '+', '')) = ?"
+            params.append(car_class.upper())
+
+        params.append(limit)
         with self._connect() as conn:
             rows = conn.execute(
                 f"""
                 SELECT *
                 FROM {table}
+                {where_clause}
                 ORDER BY
                     CASE WHEN time_seconds IS NOT NULL THEN 0 ELSE 1 END,
                     time_seconds ASC,
@@ -154,7 +259,7 @@ class RaceDatabase:
                     id ASC
                 LIMIT ?
                 """,
-                (limit,),
+                params,
             ).fetchall()
 
         return [self._row_to_result(row) for row in rows]

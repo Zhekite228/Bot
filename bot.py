@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import re
 from html import escape
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup, Update, User
@@ -8,9 +9,9 @@ from telegram.ext import Application, CallbackQueryHandler, CommandHandler, Cont
 from telegram.request import HTTPXRequest
 
 import config
-from database import RaceDatabase
+from database import RaceDatabase, RaceResult
 from ocr_service import OcrError, recognize_image
-from parser import ParsedRaceData, parse_race_text
+from parser import ParsedRaceData, parse_race_text, time_to_seconds
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -28,34 +29,78 @@ MAIN_KEYBOARD = ReplyKeyboardMarkup(
 TOP_TRACK_KEYBOARD = InlineKeyboardMarkup(
     [
         [
-            InlineKeyboardButton(config.TRACKS["obiezdnaya"], callback_data="top:obiezdnaya"),
-            InlineKeyboardButton(config.TRACKS["proseka"], callback_data="top:proseka"),
-            InlineKeyboardButton(config.TRACKS["ferma"], callback_data="top:ferma"),
+            InlineKeyboardButton(config.TRACKS["obiezdnaya"], callback_data="top:obiezdnaya:all"),
+            InlineKeyboardButton(config.TRACKS["proseka"], callback_data="top:proseka:all"),
+            InlineKeyboardButton(config.TRACKS["ferma"], callback_data="top:ferma:all"),
         ]
     ]
 )
+
+
+def build_top_keyboard(track: str, car_class: str = "all") -> InlineKeyboardMarkup:
+    track_buttons = [
+        InlineKeyboardButton(
+            config.TRACKS[track_id],
+            callback_data=f"top:{track_id}:{car_class}",
+        )
+        for track_id in config.TRACKS
+    ]
+    class_ids = list(config.CAR_CLASSES.keys())
+    class_row_1 = [
+        InlineKeyboardButton(
+            config.CAR_CLASSES[class_id],
+            callback_data=f"top:{track}:{class_id}",
+        )
+        for class_id in class_ids[:4]
+    ]
+    class_row_2 = [
+        InlineKeyboardButton(
+            config.CAR_CLASSES[class_id],
+            callback_data=f"top:{track}:{class_id}",
+        )
+        for class_id in class_ids[4:]
+    ]
+    return InlineKeyboardMarkup([track_buttons, class_row_1, class_row_2])
 
 
 class ResultRejectedError(Exception):
     pass
 
 
-def validate_result(parsed: ParsedRaceData) -> None:
-    if parsed.time_seconds is None:
-        raise ValueError("Не удалось проверить время заезда\n")
-    if parsed.time_seconds < config.MIN_LAP_TIME_SECONDS:
+def validate_result_values(*, time_str: str, time_seconds: float | None, max_speed: str, max_speed_value: float | None) -> None:
+    if time_seconds is None:
+        raise ValueError("Не удалось проверить время заезда")
+    if time_seconds < config.MIN_LAP_TIME_SECONDS:
         raise ResultRejectedError(
-            f'Результат отклонён: "{parsed.time}"\n'
+            f'Результат отклонён: "{time_str}"\n'
+            "Такой заезд не может быть засчитан."
+        )
+    if max_speed_value is None:
+        raise ValueError("Не удалось проверить максимальную скорость")
+    if max_speed_value > config.MAX_LAP_SPEED:
+        raise ResultRejectedError(
+            f'Результат отклонён: "{max_speed} км/ч"\n'
             "Такой заезд не может быть засчитан."
         )
 
-    if parsed.max_speed_value is None:
-        raise ValueError("Не удалось проверить максимальную скорость")
-    if parsed.max_speed_value > config.MAX_LAP_SPEED:
-        raise ResultRejectedError(
-            f'Результат отклонён: "{parsed.max_speed} км/ч"\n'
-            "Такой заезд не может быть засчитан."
-        )
+
+def validate_result(parsed: ParsedRaceData) -> None:
+    validate_result_values(
+        time_str=parsed.time,
+        time_seconds=parsed.time_seconds,
+        max_speed=parsed.max_speed,
+        max_speed_value=parsed.max_speed_value,
+    )
+
+
+FIELD_EDIT_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
+    ("track", re.compile(r"^(?:трасса)\s*[:：]\s*(.+)$", re.IGNORECASE)),
+    ("car_rank", re.compile(r"^(?:ранг\s*авто|ранг)\s*[:：]\s*(.+)$", re.IGNORECASE)),
+    ("car", re.compile(r"^(?:авто|машина)\s*[:：]\s*(.+)$", re.IGNORECASE)),
+    ("engine", re.compile(r"^(?:мотор|двигатель)\s*[:：]\s*(.+)$", re.IGNORECASE)),
+    ("time", re.compile(r"^(?:время)\s*[:：]\s*(.+)$", re.IGNORECASE)),
+    ("max_speed", re.compile(r"^(?:макс\.?\s*скорость|скорость)\s*[:：]\s*(.+)$", re.IGNORECASE)),
+]
 
 
 def format_result(data: ParsedRaceData) -> str:
@@ -104,6 +149,132 @@ def format_saved_result(item, track_name: str) -> str:
     )
 
 
+def format_result_from_db(result: RaceResult, track_name: str) -> str:
+    return (
+        f"Трасса: {track_name}\n"
+        f"Ранг авто: {result.car_rank}\n"
+        f"Авто: {result.car}\n"
+        f"Мотор: {result.engine}\n"
+        f"Время: {result.time}\n"
+        f"Макс. скорость: {result.max_speed}"
+    )
+
+
+def parse_admin_edits(text: str) -> dict[str, str]:
+    edits: dict[str, str] = {}
+    for line in text.strip().splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        for field, pattern in FIELD_EDIT_PATTERNS:
+            match = pattern.match(line)
+            if match:
+                edits[field] = match.group(1).strip()
+                break
+    return edits
+
+
+def resolve_track_id(name: str) -> str | None:
+    normalized = name.strip().lower()
+    for track_id, display_name in config.TRACKS.items():
+        if track_id.lower() == normalized or display_name.lower() == normalized:
+            return track_id
+    return None
+
+
+def parse_speed_value(raw: str) -> tuple[str, float]:
+    match = re.search(r"(\d+(?:[.,]\d+)?)", raw)
+    if not match:
+        raise ValueError(f"Не удалось распознать скорость: {raw}")
+    number = float(match.group(1).replace(",", "."))
+    display = raw if re.search(r"km/h|км/ч", raw, re.IGNORECASE) else f"{int(number) if number.is_integer() else number} km/h"
+    return display, number
+
+
+def review_key(track: str, result_id: int) -> str:
+    return f"{track}:{result_id}"
+
+
+def register_review_notification(
+    context: ContextTypes.DEFAULT_TYPE,
+    track: str,
+    result_id: int,
+    admin_id: int,
+    message_id: int,
+) -> None:
+    store_review_message(context, admin_id, message_id, track, result_id)
+    reviews = context.bot_data.setdefault("pending_reviews", {})
+    key = review_key(track, result_id)
+    if key not in reviews:
+        reviews[key] = {"status": "pending", "messages": []}
+    reviews[key]["messages"].append((admin_id, message_id))
+
+
+def get_review_status(context: ContextTypes.DEFAULT_TYPE, track: str, result_id: int) -> str | None:
+    review = context.bot_data.get("pending_reviews", {}).get(review_key(track, result_id))
+    return review["status"] if review else None
+
+
+def set_review_status(context: ContextTypes.DEFAULT_TYPE, track: str, result_id: int, status: str) -> None:
+    reviews = context.bot_data.setdefault("pending_reviews", {})
+    key = review_key(track, result_id)
+    if key in reviews:
+        reviews[key]["status"] = status
+
+
+async def close_review_for_all_admins(
+    context: ContextTypes.DEFAULT_TYPE,
+    track: str,
+    result_id: int,
+    text: str,
+) -> None:
+    review = context.bot_data.get("pending_reviews", {}).get(review_key(track, result_id))
+    if not review:
+        return
+
+    for admin_id, message_id in review["messages"]:
+        try:
+            await context.bot.edit_message_caption(
+                chat_id=admin_id,
+                message_id=message_id,
+                caption=text,
+                reply_markup=None,
+            )
+        except Exception:
+            try:
+                await context.bot.edit_message_text(
+                    chat_id=admin_id,
+                    message_id=message_id,
+                    text=text,
+                    reply_markup=None,
+                )
+            except Exception:
+                logger.exception("Failed to close review message for admin %s", admin_id)
+
+
+def store_review_message(
+    context: ContextTypes.DEFAULT_TYPE,
+    admin_id: int,
+    message_id: int,
+    track: str,
+    result_id: int,
+) -> None:
+    context.bot_data.setdefault("review_messages", {})[(admin_id, message_id)] = (track, result_id)
+
+
+def get_review_message(context: ContextTypes.DEFAULT_TYPE, admin_id: int, message_id: int) -> tuple[str, int] | None:
+    return context.bot_data.get("review_messages", {}).get((admin_id, message_id))
+
+
+def build_admin_review_caption(user_name: str, result: RaceResult, track_name: str) -> str:
+    return (
+        f"Новый результат от {escape(user_name)}\n\n"
+        f"{escape(format_result_from_db(result, track_name))}\n\n"
+        "↩️ Ответьте на это сообщение с исправлением, например:\n"
+        "<code>Мотор: Z513</code>"
+    )
+
+
 async def update_admin_review_message(query, text: str) -> None:
     if not query.message:
         return
@@ -143,14 +314,16 @@ async def notify_admins_for_review(
 
     caption = (
         f"Новый результат от {escape(user_name)}\n\n"
-        f"{escape(format_result(parsed))}"
+        f"{escape(format_result(parsed))}\n\n"
+        "↩️ Ответьте на это сообщение с исправлением, например:\n"
+        "<code>Мотор: Z513</code>"
     )
     keyboard = build_admin_review_keyboard(parsed.track, result_id)
 
     for admin_id in config.ADMIN_IDS:
         try:
             if photo_file_id:
-                await context.bot.send_photo(
+                message = await context.bot.send_photo(
                     admin_id,
                     photo_file_id,
                     caption=caption,
@@ -158,7 +331,7 @@ async def notify_admins_for_review(
                     reply_markup=keyboard,
                 )
             elif document_file_id:
-                await context.bot.send_document(
+                message = await context.bot.send_document(
                     admin_id,
                     document_file_id,
                     caption=caption,
@@ -166,12 +339,13 @@ async def notify_admins_for_review(
                     reply_markup=keyboard,
                 )
             else:
-                await context.bot.send_message(
+                message = await context.bot.send_message(
                     admin_id,
                     caption,
                     parse_mode=ParseMode.HTML,
                     reply_markup=keyboard,
                 )
+            register_review_notification(context, parsed.track, result_id, admin_id, message.message_id)
         except Exception:
             logger.exception("Failed to notify admin %s", admin_id)
 
@@ -215,11 +389,15 @@ async def save_pending_result(
     )
 
 
-def format_top_results(results, track_name: str) -> str:
+def format_top_results(results, track_name: str, car_class: str = "all") -> str:
+    class_label = config.CAR_CLASSES.get(car_class, car_class)
     if not results:
-        return f"Пока нет записей на трассе «{track_name}». Отправьте скриншот гонки, чтобы добавить результат."
+        return (
+            f"Пока нет записей на трассе «{track_name}» "
+            f"(класс {class_label}). Отправьте скриншот гонки, чтобы добавить результат."
+        )
 
-    lines = [f"🏁 Топ-10 — {track_name}:\n"]
+    lines = [f"🏁 Топ-10 — {track_name} — класс {class_label}:\n"]
     medals = {1: "🥇", 2: "🥈", 3: "🥉"}
     for index, item in enumerate(results, start=1):
         place = medals.get(index, f"{index}.")
@@ -316,7 +494,146 @@ async def handle_user_question(update: Update, context: ContextTypes.DEFAULT_TYP
         )
 
 
+async def apply_admin_edits(track: str, result_id: int, edits: dict[str, str]) -> tuple[str, int, RaceResult]:
+    result = db.get_result(track, result_id)
+    if not result:
+        raise ValueError("Результат не найден")
+
+    if "track" in edits:
+        new_track = resolve_track_id(edits["track"])
+        if not new_track:
+            raise ValueError(f"Неизвестная трасса: {edits['track']}")
+        moved_id = db.move_result(track, result_id, new_track)
+        if moved_id is None:
+            raise ValueError("Не удалось перенести результат на другую трассу")
+        track = new_track
+        result_id = moved_id
+        result = db.get_result(track, result_id)
+        if not result:
+            raise ValueError("Результат не найден после переноса")
+
+    update_kwargs: dict[str, object] = {}
+    if "car_rank" in edits:
+        update_kwargs["car_rank"] = edits["car_rank"]
+    if "car" in edits:
+        update_kwargs["car"] = edits["car"]
+    if "engine" in edits:
+        update_kwargs["engine"] = edits["engine"]
+    if "time" in edits:
+        time_str = edits["time"].replace(",", ".")
+        time_seconds = time_to_seconds(time_str)
+        update_kwargs["time"] = time_str
+        update_kwargs["time_seconds"] = time_seconds
+    if "max_speed" in edits:
+        max_speed, max_speed_value = parse_speed_value(edits["max_speed"])
+        update_kwargs["max_speed"] = max_speed
+        update_kwargs["max_speed_value"] = max_speed_value
+
+    if update_kwargs:
+        db.update_result(track, result_id, **update_kwargs)
+
+    result = db.get_result(track, result_id)
+    if not result:
+        raise ValueError("Результат не найден")
+
+    validate_result_values(
+        time_str=result.time,
+        time_seconds=result.time_seconds,
+        max_speed=result.max_speed,
+        max_speed_value=result.max_speed_value,
+    )
+    return track, result_id, result
+
+
+async def update_review_notification(
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    chat_id: int,
+    message_id: int,
+    user_name: str,
+    track: str,
+    result_id: int,
+    result: RaceResult,
+) -> None:
+    track_name = config.TRACKS[track]
+    caption = build_admin_review_caption(user_name, result, track_name)
+    keyboard = build_admin_review_keyboard(track, result_id)
+    store_review_message(context, chat_id, message_id, track, result_id)
+
+    try:
+        await context.bot.edit_message_caption(
+            chat_id=chat_id,
+            message_id=message_id,
+            caption=caption,
+            parse_mode=ParseMode.HTML,
+            reply_markup=keyboard,
+        )
+    except Exception:
+        await context.bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=message_id,
+            text=caption,
+            parse_mode=ParseMode.HTML,
+            reply_markup=keyboard,
+        )
+
+
+async def handle_admin_result_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    message = update.message
+    if not message or not message.reply_to_message or not message.text or not message.from_user:
+        return False
+    if not is_admin(message.from_user.id):
+        return False
+
+    review_key = (message.chat_id, message.reply_to_message.message_id)
+    review_info = get_review_message(context, message.chat_id, message.reply_to_message.message_id)
+    if not review_info:
+        return False
+
+    track, result_id = review_info
+    edits = parse_admin_edits(message.text)
+    if not edits:
+        await message.reply_text(
+            "Не удалось распознать исправление.\n"
+            "Пример: <code>Мотор: Z513</code>",
+            parse_mode=ParseMode.HTML,
+        )
+        return True
+
+    try:
+        track, result_id, result = await apply_admin_edits(track, result_id, edits)
+    except ResultRejectedError as exc:
+        await message.reply_text(str(exc))
+        return True
+    except ValueError as exc:
+        await message.reply_text(str(exc))
+        return True
+
+    user_name = result.user_name or f"ID {result.user_id}"
+    try:
+        await update_review_notification(
+            context,
+            chat_id=message.chat_id,
+            message_id=message.reply_to_message.message_id,
+            user_name=user_name,
+            track=track,
+            result_id=result_id,
+            result=result,
+        )
+    except Exception:
+        logger.exception("Failed to update review notification")
+
+    await message.reply_text(
+        "✅ Результат обновлён:\n\n"
+        f"{format_saved_result(result, config.TRACKS[track])}"
+    )
+    return True
+
+
 async def handle_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if await handle_admin_result_edit(update, context):
+        return
+
     message = update.message
     if not message or not message.reply_to_message or not message.text or not message.from_user:
         return
@@ -365,6 +682,14 @@ async def admin_review_callback(update: Update, context: ContextTypes.DEFAULT_TY
         return
 
     result_id = int(result_id_raw)
+    review_status = get_review_status(context, track, result_id)
+    if review_status in {"confirmed", "rejected"}:
+        message = "Результат уже подтверждён" if review_status == "confirmed" else "Результат уже обработан"
+        await query.answer(message, show_alert=True)
+        if query.message:
+            await query.message.edit_reply_markup(reply_markup=None)
+        return
+
     result = db.get_result(track, result_id)
     if not result:
         await query.answer("Результат уже обработан", show_alert=True)
@@ -375,12 +700,23 @@ async def admin_review_callback(update: Update, context: ContextTypes.DEFAULT_TY
     track_name = config.TRACKS[track]
 
     if action == "confirm":
-        db.set_confirmed(track, result_id, True)
+        if result.confirmed:
+            await query.answer("Результат уже подтверждён", show_alert=True)
+            if query.message:
+                await query.message.edit_reply_markup(reply_markup=None)
+            return
+
+        if not db.confirm_result_if_pending(track, result_id):
+            set_review_status(context, track, result_id, "confirmed")
+            await query.answer("Результат уже подтверждён", show_alert=True)
+            if query.message:
+                await query.message.edit_reply_markup(reply_markup=None)
+            return
+
+        set_review_status(context, track, result_id, "confirmed")
+        status_text = f"✅ Подтверждено\n\n{format_saved_result(result, track_name)}"
+        await close_review_for_all_admins(context, track, result_id, status_text)
         await query.answer("Результат подтверждён")
-        await update_admin_review_message(
-            query,
-            f"✅ Подтверждено\n\n{format_saved_result(result, track_name)}",
-        )
         try:
             await context.bot.send_message(
                 result.user_id,
@@ -393,12 +729,17 @@ async def admin_review_callback(update: Update, context: ContextTypes.DEFAULT_TY
         return
 
     if action == "reject":
+        if result.confirmed:
+            await query.answer("Результат уже подтверждён", show_alert=True)
+            if query.message:
+                await query.message.edit_reply_markup(reply_markup=None)
+            return
+
         db.delete_result(track, result_id)
+        set_review_status(context, track, result_id, "rejected")
+        status_text = f"❌ Отклонено\n\n{format_saved_result(result, track_name)}"
+        await close_review_for_all_admins(context, track, result_id, status_text)
         await query.answer("Результат отклонён")
-        await update_admin_review_message(
-            query,
-            f"❌ Отклонено\n\n{format_saved_result(result, track_name)}",
-        )
         try:
             await context.bot.send_message(
                 result.user_id,
@@ -415,19 +756,31 @@ async def top_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if not query or not query.data or not query.data.startswith("top:"):
         return
 
-    track = query.data.split(":", 1)[1]
+    parts = query.data.split(":")
+    if len(parts) == 2:
+        _, track = parts
+        car_class = "all"
+    elif len(parts) == 3:
+        _, track, car_class = parts
+    else:
+        await query.answer("Некорректные данные")
+        return
+
     if track not in config.TRACKS:
         await query.answer("Неизвестная трасса")
+        return
+    if car_class not in config.CAR_CLASSES:
+        await query.answer("Неизвестный класс")
         return
 
     await query.answer()
     track_name = config.TRACKS[track]
-    results = db.get_top_results(track, limit=10)
+    results = db.get_top_results(track, limit=10, car_class=car_class)
     await query.edit_message_text(
-        format_top_results(results, track_name),
+        format_top_results(results, track_name, car_class),
         parse_mode=ParseMode.HTML,
         disable_web_page_preview=True,
-        reply_markup=TOP_TRACK_KEYBOARD,
+        reply_markup=build_top_keyboard(track, car_class),
     )
 
 
