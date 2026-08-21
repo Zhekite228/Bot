@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Optional
 
 import config
+from parser import normalize_car_rank
 
 
 @dataclass
@@ -62,12 +63,23 @@ class RaceDatabase:
                     """
                 )
                 self._ensure_columns(conn, table)
+                self._normalize_existing_ranks(conn, table)
             conn.commit()
 
     def _ensure_columns(self, conn: sqlite3.Connection, table: str) -> None:
         columns = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
         if "confirmed" not in columns:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN confirmed INTEGER NOT NULL DEFAULT 0")
+
+    def _normalize_existing_ranks(self, conn: sqlite3.Connection, table: str) -> None:
+        rows = conn.execute(f"SELECT id, car_rank FROM {table}").fetchall()
+        for row in rows:
+            normalized = normalize_car_rank(row["car_rank"])
+            if normalized != row["car_rank"]:
+                conn.execute(
+                    f"UPDATE {table} SET car_rank = ? WHERE id = ?",
+                    (normalized, row["id"]),
+                )
 
     def add_result(
         self,
@@ -95,7 +107,7 @@ class RaceDatabase:
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
                 """,
                 (
-                    car_rank,
+                    normalize_car_rank(car_rank),
                     car,
                     engine,
                     time,
@@ -154,7 +166,7 @@ class RaceDatabase:
     ) -> bool:
         fields: dict[str, object] = {}
         if car_rank is not None:
-            fields["car_rank"] = car_rank
+            fields["car_rank"] = normalize_car_rank(car_rank)
         if car is not None:
             fields["car"] = car
         if engine is not None:
@@ -242,7 +254,7 @@ class RaceDatabase:
 
         if car_class and car_class != "all":
             where_clause = "WHERE UPPER(REPLACE(car_rank, '+', '')) = ?"
-            params.append(car_class.upper())
+            params.append(normalize_car_rank(car_class).replace("+", ""))
 
         params.append(limit)
         with self._connect() as conn:

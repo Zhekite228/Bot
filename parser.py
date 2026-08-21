@@ -48,6 +48,20 @@ SPEED_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+# OCR из русского интерфейса часто распознаёт латинские классы как кириллицу.
+CYRILLIC_TO_LATIN_RANK = str.maketrans(
+    {
+        "А": "A",
+        "а": "A",
+        "В": "B",
+        "в": "B",
+        "С": "C",
+        "с": "C",
+        "Е": "E",
+        "е": "E",
+    }
+)
+
 
 def normalize_car_rank(value: str | None) -> str:
     if not value:
@@ -57,7 +71,17 @@ def normalize_car_rank(value: str | None) -> str:
     if cleaned in {"—", "-", ""}:
         return config.DEFAULT_CAR_RANK
 
-    return cleaned.upper()
+    has_plus = cleaned.endswith("+")
+    base = cleaned[:-1] if has_plus else cleaned
+    base = base.translate(CYRILLIC_TO_LATIN_RANK).upper()
+    if not base:
+        return config.DEFAULT_CAR_RANK
+
+    valid_classes = set(config.CAR_CLASSES) - {"all"}
+    if len(base) > 1 and base[0] in valid_classes:
+        base = base[0]
+
+    return base + ("+" if has_plus else "")
 
 
 def parse_race_text(text: str) -> ParsedRaceData:

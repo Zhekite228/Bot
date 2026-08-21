@@ -11,7 +11,7 @@ from telegram.request import HTTPXRequest
 import config
 from database import RaceDatabase, RaceResult
 from ocr_service import OcrError, recognize_image
-from parser import ParsedRaceData, parse_race_text, time_to_seconds
+from parser import ParsedRaceData, normalize_car_rank, parse_race_text, time_to_seconds
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -514,7 +514,7 @@ async def apply_admin_edits(track: str, result_id: int, edits: dict[str, str]) -
 
     update_kwargs: dict[str, object] = {}
     if "car_rank" in edits:
-        update_kwargs["car_rank"] = edits["car_rank"]
+        update_kwargs["car_rank"] = normalize_car_rank(edits["car_rank"])
     if "car" in edits:
         update_kwargs["car"] = edits["car"]
     if "engine" in edits:
