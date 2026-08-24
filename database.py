@@ -233,6 +233,7 @@ class RaceDatabase:
             conn.commit()
         return new_id
 
+    def delete_result(self, track: str, result_id: int) -> bool:
         table = self._table_name(track)
         with self._connect() as conn:
             cursor = conn.execute(

@@ -25,6 +25,7 @@ TRACKS: dict[str, str] = {
     "obiezdnaya": "Обьездная",
     "proseka": "Просека",
     "ferma": "ферма",
+    "gonochnaya": "Гоночная трасса",
 }
 
 CAR_CLASSES: dict[str, str] = {

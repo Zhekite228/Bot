@@ -22,6 +22,7 @@ TRACK_PATTERNS: dict[str, re.Pattern[str]] = {
     "obiezdnaya": re.compile(r"(?:об[ьъ]?[её]здн|ob[ie][e]?zdn)", re.IGNORECASE),
     "proseka": re.compile(r"(?:просек|prosek)", re.IGNORECASE),
     "ferma": re.compile(r"(?:ферм|ferm)", re.IGNORECASE),
+    "gonochnaya": re.compile(r"(?:гоночн(?:ая)?\s*трасс|gonoch(?:naya)?\s*trass)", re.IGNORECASE),
 }
 
 
@@ -136,7 +137,7 @@ def _extract_track(text: str) -> tuple[str, str]:
     for track_id, pattern in TRACK_PATTERNS.items():
         if pattern.search(text):
             return track_id, config.TRACKS[track_id]
-    raise ValueError("Не удалось распознать трассу (Обьездная, Просека, ферма)")
+    raise ValueError("Не удалось распознать трассу (Обьездная, Просека, ферма, Гоночная трасса)")
 
 
 def _extract_rank_from_header(text: str) -> Optional[str]:

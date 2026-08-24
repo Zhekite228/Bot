@@ -26,15 +26,19 @@ MAIN_KEYBOARD = ReplyKeyboardMarkup(
     resize_keyboard=True,
 )
 
-TOP_TRACK_KEYBOARD = InlineKeyboardMarkup(
-    [
+def build_top_track_keyboard() -> InlineKeyboardMarkup:
+    track_ids = list(config.TRACKS.keys())
+    rows = [
         [
-            InlineKeyboardButton(config.TRACKS["obiezdnaya"], callback_data="top:obiezdnaya:all"),
-            InlineKeyboardButton(config.TRACKS["proseka"], callback_data="top:proseka:all"),
-            InlineKeyboardButton(config.TRACKS["ferma"], callback_data="top:ferma:all"),
+            InlineKeyboardButton(config.TRACKS[track_id], callback_data=f"top:{track_id}:all")
+            for track_id in track_ids[index : index + 2]
         ]
+        for index in range(0, len(track_ids), 2)
     ]
-)
+    return InlineKeyboardMarkup(rows)
+
+
+TOP_TRACK_KEYBOARD = build_top_track_keyboard()
 
 
 def build_top_keyboard(track: str, car_class: str = "all") -> InlineKeyboardMarkup:
